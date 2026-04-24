@@ -15,12 +15,17 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const auth = getFirebaseAuth();
-    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
-      setUser(nextUser || null);
+    try {
+      const auth = getFirebaseAuth();
+      const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+        setUser(nextUser || null);
+        setLoading(false);
+      });
+      return unsubscribe;
+    } catch (error) {
+      console.error("Firebase初期化エラー:", error);
       setLoading(false);
-    });
-    return unsubscribe;
+    }
   }, []);
 
   const value = useMemo(

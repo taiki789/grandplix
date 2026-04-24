@@ -12,22 +12,43 @@ const firebaseConfig = {
   measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
 };
 
-let app, auth;
+let app;
+let auth;
 
-// Only initialize Firebase on client side
-if (typeof window !== "undefined") {
-  app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-  auth = getAuth(app);
+function hasRequiredFirebaseConfig() {
+  return Boolean(
+    firebaseConfig.apiKey &&
+      firebaseConfig.authDomain &&
+      firebaseConfig.projectId &&
+      firebaseConfig.appId
+  );
+}
+
+function getFirebaseApp() {
+  if (typeof window === "undefined") {
+    throw new Error("Firebase app is not available on the server side");
+  }
+
+  if (!hasRequiredFirebaseConfig()) {
+    throw new Error("Firebaseの環境変数が不足しています");
+  }
+
+  if (!app) {
+    app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+  }
+
+  return app;
 }
 
 export const getFirebaseAuth = () => {
-  if (typeof window === "undefined") {
-    throw new Error("Firebase auth is not available on the server side");
+  if (!auth) {
+    auth = getAuth(getFirebaseApp());
   }
+
   return auth;
 };
 
 export const analyticsPromise =
   typeof window !== "undefined"
-    ? isSupported().then((supported) => (supported ? getAnalytics(app) : null))
+    ? isSupported().then((supported) => (supported ? getAnalytics(getFirebaseApp()) : null))
     : Promise.resolve(null);
