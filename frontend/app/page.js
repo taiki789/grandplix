@@ -12,7 +12,7 @@ export default function HomePage() {
 
   const [baseURL, setBaseURL] = useState("");
   const [ids, setIds] = useState("");
-  const [qrSize, setQrSize] = useState(150);
+  const [qrSizeInput, setQrSizeInput] = useState("150");
   const [qrPosition, setQrPosition] = useState("center");
   const [file, setFile] = useState(null);
 
@@ -53,13 +53,19 @@ export default function HomePage() {
       return;
     }
 
+    const parsedQrSize = Number(qrSizeInput);
+    if (!qrSizeInput.trim() || !Number.isFinite(parsedQrSize) || parsedQrSize < 16 || parsedQrSize > 2000) {
+      setError("QRサイズは16〜2000の数値で入力してください。");
+      return;
+    }
+
     setSubmitting(true);
     try {
       const token = await user.getIdToken();
       const form = new FormData();
       form.append("baseURL", baseURL);
       form.append("ids", ids);
-      form.append("qrSize", String(qrSize));
+      form.append("qrSize", String(Math.round(parsedQrSize)));
       form.append("qrPosition", qrPosition);
       form.append("file", file);
 
@@ -145,8 +151,13 @@ export default function HomePage() {
               type="number"
               min={16}
               max={2000}
-              value={qrSize}
-              onChange={(e) => setQrSize(Number(e.target.value || 150))}
+              value={qrSizeInput}
+              onChange={(e) => setQrSizeInput(e.target.value)}
+              onBlur={() => {
+                if (!qrSizeInput.trim()) {
+                  setQrSizeInput("150");
+                }
+              }}
             />
           </label>
 
