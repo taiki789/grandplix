@@ -23,8 +23,13 @@ const UPLOAD_DIR = path.join(ROOT_DIR, "uploads");
 const TEMP_DIR = path.join(ROOT_DIR, "temp");
 const OUTPUT_DIR = path.join(ROOT_DIR, "output");
 const FONT_PATH = path.join(ROOT_DIR, "NotoSansJP-Regular.ttf");
+const JOB_CONCURRENCY = Math.max(1, Number(process.env.JOB_CONCURRENCY || 4));
+const JOB_TTL_MS = Math.max(60_000, Number(process.env.JOB_TTL_MS || 10 * 60 * 1000));
+const DEFAULT_PLACEMENT_X = 1;
+const DEFAULT_PLACEMENT_Y = 2;
 
 const MAX_IDS = 500;
+const jobs = new Map();
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 
@@ -105,12 +110,111 @@ async function removePathSafe(targetPath) {
   }
 }
 
+function safeNowIso() {
+  return new Date().toISOString();
+}
+
+function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUploadedPath, pdfUploadedPath }) {
+  const jobDir = path.join(TEMP_DIR, sanitizeFilename(`job-${jobId}`));
+  const outDir = path.join(jobDir, "output");
+  const zipPath = path.join(jobDir, `qr_outputs_${jobId}.zip`);
+  return {
+    id: jobId,
+    state: "queued",
+    message: "ジョブを作成しました",
+    error: null,
+    baseURL,
+    qrSize,
+    placementX,
+    placementY,
+    csvUploadedPath,
+    pdfUploadedPath,
+    jobDir,
+    outDir,
+    zipPath,
+    total: 0,
+    processed: 0,
+    failed: 0,
+    startedAt: Date.now(),
+    finishedAt: null,
+    createdAt: safeNowIso()
+  };
+}
+
+function computeProgress(job) {
+  const total = Number(job.total || 0);
+  const processed = Number(job.processed || 0);
+  const elapsedSecondsRaw = (Date.now() - Number(job.startedAt || Date.now())) / 1000;
+  const elapsedSeconds = Math.max(0, Math.round(elapsedSecondsRaw));
+
+  let progressPercent = 0;
+  if (total > 0) {
+    progressPercent = Math.min(100, Math.max(0, Math.round((processed / total) * 100)));
+  }
+
+  let etaSeconds = null;
+  if (job.state === "running" && processed > 0 && total > processed) {
+    const avgPerItem = elapsedSecondsRaw / processed;
+    etaSeconds = Math.max(0, Math.round(avgPerItem * (total - processed)));
+  }
+
+  return {
+    progressPercent,
+    elapsedSeconds,
+    etaSeconds
+  };
+}
+
+function scheduleJobCleanup(jobId) {
+  setTimeout(async () => {
+    const job = jobs.get(jobId);
+    if (!job) return;
+    await removePathSafe(job.jobDir);
+    await removePathSafe(job.csvUploadedPath);
+    await removePathSafe(job.pdfUploadedPath);
+    jobs.delete(jobId);
+  }, JOB_TTL_MS);
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  if (!Array.isArray(items) || items.length === 0) return;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  let cursor = 0;
+
+  async function consume() {
+    while (true) {
+      const idx = cursor;
+      cursor += 1;
+      if (idx >= items.length) break;
+      await worker(items[idx], idx);
+    }
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, () => consume()));
+}
+
 function parseQrSize(value) {
   const size = Number(value || 120);
   if (!Number.isFinite(size) || size < 16 || size > 2000) {
     throw new Error("qrSize は 16〜2000 の数値で指定してください");
   }
   return Math.round(size);
+}
+
+function parsePlacementX(value) {
+  const parsed = Number.parseInt(String(value ?? DEFAULT_PLACEMENT_X), 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 2) {
+    throw new Error("placementX は 0〜2 の整数で指定してください");
+  }
+  return parsed;
+}
+
+function parsePlacementY(value) {
+  const parsed = Number.parseInt(String(value ?? DEFAULT_PLACEMENT_Y), 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 4) {
+    throw new Error("placementY は 0〜4 の整数で指定してください");
+  }
+  return parsed;
 }
 
 function truncateText(value, maxLen = 20) {
@@ -149,12 +253,45 @@ function parseCsvRows(csvBuffer) {
   return normalized;
 }
 
-async function overlayQrAndTextOnPdf({ templatePdfPath, qrPath, outputPdfPath, qrSize, text1, text2 }) {
-  const pdfBytes = await fsp.readFile(templatePdfPath);
-  const qrBytes = await fsp.readFile(qrPath);
-  const fontBytes = fs.readFileSync(FONT_PATH);
+async function ensureFontReady() {
+  if (!fs.existsSync(FONT_PATH)) {
+    throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が backend フォルダにありません");
+  }
 
-  const pdfDoc = await PDFDocument.load(pdfBytes);
+  const fontStat = await fsp.stat(FONT_PATH);
+  if (!fontStat.size) {
+    throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が空です。実ファイルを配置してください");
+  }
+}
+
+function resolveBlockPosition({ placementX, placementY, pageWidth, pageHeight, blockWidth, blockHeight, margin = 24 }) {
+  const maxX = Math.max(margin, pageWidth - margin - blockWidth);
+  const maxY = Math.max(margin, pageHeight - margin - blockHeight);
+  const spanX = Math.max(0, maxX - margin);
+  const spanY = Math.max(0, maxY - margin);
+
+  const normalizedX = Number.isInteger(placementX) ? placementX : DEFAULT_PLACEMENT_X;
+  const normalizedY = Number.isInteger(placementY) ? placementY : DEFAULT_PLACEMENT_Y;
+
+  const x = margin + (spanX * (normalizedX / 2));
+  const y = margin + (spanY * ((4 - normalizedY) / 4));
+
+  return {
+    x: Math.max(margin, Math.min(x, maxX)),
+    y: Math.max(margin, Math.min(y, maxY))
+  };
+}
+
+function drawCenteredTextBold(page, font, text, fontSize, centerX, y) {
+  const textWidth = font.widthOfTextAtSize(text, fontSize);
+  const x = centerX - textWidth / 2;
+
+  page.drawText(text, { x, y, size: fontSize, font });
+  page.drawText(text, { x: x + 0.5, y, size: fontSize, font });
+}
+
+async function overlayQrAndTextOnPdf({ templatePdfBytes, qrBytes, qrSize, text1, text2, placementX, placementY, fontBytes }) {
+  const pdfDoc = await PDFDocument.load(templatePdfBytes);
   pdfDoc.registerFontkit(fontkit);
   const font = await pdfDoc.embedFont(fontBytes);
   const pages = pdfDoc.getPages();
@@ -167,30 +304,37 @@ async function overlayQrAndTextOnPdf({ templatePdfPath, qrPath, outputPdfPath, q
   const { width, height } = page.getSize();
   const image = await pdfDoc.embedPng(qrBytes);
 
-  const drawSize = Math.min(Number(qrSize || 120), width, height);
-  const centerX = width / 2;
-  const centerY = height / 2;
+  const textSize = 18;
+  const textGap = 6;
+  const qrGap = 10;
 
-  const qrX = centerX - drawSize / 2;
-  const qrY = centerY - drawSize / 2;
-  const text1Y = qrY + drawSize + 25;
-  const text2Y = qrY + drawSize + 10;
+  const rawDrawSize = Number(qrSize || 120);
+  const drawSize = Math.min(rawDrawSize, width - 48, height - 48);
 
-  const textSize = 12;
+  const text1Width = font.widthOfTextAtSize(text1, textSize);
+  const text2Width = font.widthOfTextAtSize(text2, textSize);
+  const blockWidth = Math.max(drawSize, text1Width, text2Width);
+  const lineHeight = textSize + textGap;
+  const blockHeight = drawSize + qrGap + (lineHeight * 2);
 
-  page.drawText(text1, {
-    x: centerX - font.widthOfTextAtSize(text1, textSize) / 2,
-    y: text1Y,
-    size: textSize,
-    font
+  const blockPos = resolveBlockPosition({
+    placementX,
+    placementY,
+    pageWidth: width,
+    pageHeight: height,
+    blockWidth,
+    blockHeight,
+    margin: 24
   });
 
-  page.drawText(text2, {
-    x: centerX - font.widthOfTextAtSize(text2, textSize) / 2,
-    y: text2Y,
-    size: textSize,
-    font
-  });
+  const centerX = blockPos.x + (blockWidth / 2);
+  const qrX = blockPos.x + (blockWidth - drawSize) / 2;
+  const qrY = blockPos.y;
+  const text2Y = qrY + drawSize + qrGap;
+  const text1Y = text2Y + lineHeight;
+
+  drawCenteredTextBold(page, font, text1, textSize, centerX, text1Y);
+  drawCenteredTextBold(page, font, text2, textSize, centerX, text2Y);
 
   page.drawImage(image, {
     x: qrX,
@@ -199,8 +343,7 @@ async function overlayQrAndTextOnPdf({ templatePdfPath, qrPath, outputPdfPath, q
     height: drawSize
   });
 
-  const outputBytes = await pdfDoc.save();
-  await fsp.writeFile(outputPdfPath, outputBytes);
+  return pdfDoc.save();
 }
 
 function verifyUploadExtension(file) {
@@ -212,8 +355,8 @@ function createUploadStorage() {
   return multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
     filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname || "").toLowerCase() || ".pdf";
-      const safeExt = ext === ".pdf" ? ".pdf" : "";
+      const ext = path.extname(file.originalname || "").toLowerCase();
+      const safeExt = ext === ".pdf" || ext === ".csv" ? ext : "";
       cb(null, `${Date.now()}-${crypto.randomUUID()}${safeExt}`);
     }
   });
@@ -224,22 +367,119 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (!verifyUploadExtension(file)) {
-      cb(new Error(".pdf ファイルのみアップロード可能です"));
+      cb(new Error(".pdf / .csv ファイルのみアップロード可能です"));
       return;
     }
     cb(null, true);
   }
 });
 
-async function runPdfOverlayJob({ templatePdfPath, qrPath, outputPdfPath, qrSize, text1, text2 }) {
-  await overlayQrAndTextOnPdf({
-    templatePdfPath,
-    qrPath,
-    outputPdfPath,
-    qrSize,
-    text1,
-    text2
+function buildStatusResponse(job) {
+  const timing = computeProgress(job);
+  return {
+    jobId: job.id,
+    state: job.state,
+    message: job.message,
+    error: job.error,
+    total: job.total,
+    processed: job.processed,
+    failed: job.failed,
+    progressPercent: timing.progressPercent,
+    elapsedSeconds: timing.elapsedSeconds,
+    etaSeconds: timing.etaSeconds,
+    downloadReady: job.state === "completed",
+    createdAt: job.createdAt,
+    finishedAt: job.finishedAt
+  };
+}
+
+async function createZipFromOutputDir({ outDir, zipPath }) {
+  await new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+
+    output.on("close", () => resolve());
+    output.on("error", reject);
+    archive.on("error", reject);
+
+    archive.pipe(output);
+    archive.directory(outDir, false);
+    archive.finalize();
   });
+}
+
+async function runGenerateJob(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+
+  try {
+    await ensureFontReady();
+
+    job.state = "running";
+    job.message = "CSVを解析しています";
+
+    const [csvBuffer, templatePdfBytes, fontBytes] = await Promise.all([
+      fsp.readFile(job.csvUploadedPath),
+      fsp.readFile(job.pdfUploadedPath),
+      fsp.readFile(FONT_PATH)
+    ]);
+
+    const rows = parseCsvRows(csvBuffer);
+    if (rows.length === 0) {
+      throw new Error("有効なCSV行がありませんでした");
+    }
+
+    job.total = rows.length;
+    job.message = "PDFを生成しています";
+
+    await fsp.mkdir(job.outDir, { recursive: true });
+
+    await runWithConcurrency(rows, JOB_CONCURRENCY, async ({ id, text1, text2 }) => {
+      const url = `${job.baseURL}${id}`;
+      const safeId = sanitizeFilename(id);
+
+      const qrBytes = await QRCode.toBuffer(url, {
+        type: "png",
+        width: job.qrSize,
+        margin: 1
+      });
+
+      const outputBytes = await overlayQrAndTextOnPdf({
+        templatePdfBytes,
+        qrBytes,
+        qrSize: job.qrSize,
+        text1,
+        text2,
+        placementX: job.placementX,
+        placementY: job.placementY,
+        fontBytes
+      });
+
+      const outputPdfPath = path.join(job.outDir, `output_${safeId}.pdf`);
+      await fsp.writeFile(outputPdfPath, outputBytes);
+      job.processed += 1;
+    });
+
+    if (job.processed === 0) {
+      throw new Error("出力ファイルが生成されませんでした");
+    }
+
+    job.message = "ZIPを作成しています";
+    await createZipFromOutputDir({ outDir: job.outDir, zipPath: job.zipPath });
+
+    job.state = "completed";
+    job.message = "生成が完了しました";
+    job.finishedAt = safeNowIso();
+  } catch (error) {
+    job.state = "failed";
+    job.error = error.message || "出力生成に失敗しました";
+    job.message = "生成に失敗しました";
+    job.finishedAt = safeNowIso();
+  } finally {
+    await removePathSafe(job.csvUploadedPath);
+    await removePathSafe(job.pdfUploadedPath);
+    scheduleJobCleanup(jobId);
+  }
 }
 
 async function authMiddleware(req, res, next) {
@@ -269,21 +509,11 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/generate", authMiddleware, upload.fields([{ name: "csvFile", maxCount: 1 }, { name: "pdfFile", maxCount: 1 }]), async (req, res) => {
-  let jobDir;
+app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", maxCount: 1 }, { name: "pdfFile", maxCount: 1 }]), async (req, res) => {
   let csvUploadedPath;
   let pdfUploadedPath;
 
   try {
-    if (!fs.existsSync(FONT_PATH)) {
-      throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が backend フォルダにありません");
-    }
-
-    const fontStat = await fsp.stat(FONT_PATH);
-    if (!fontStat.size) {
-      throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が空です。実ファイルを配置してください");
-    }
-
     const csvFile = req.files?.csvFile?.[0];
     const pdfFile = req.files?.pdfFile?.[0];
 
@@ -293,7 +523,17 @@ app.post("/generate", authMiddleware, upload.fields([{ name: "csvFile", maxCount
     }
 
     if (!pdfFile) {
+      await removePathSafe(csvFile.path);
       res.status(400).json({ error: "テンプレート PDF ファイル（.pdf）を指定してください" });
+      return;
+    }
+
+    try {
+      await ensureFontReady();
+    } catch (error) {
+      await removePathSafe(csvFile.path);
+      await removePathSafe(pdfFile.path);
+      res.status(500).json({ error: error.message || "日本語フォントファイルの読み込みに失敗しました" });
       return;
     }
 
@@ -310,74 +550,79 @@ app.post("/generate", authMiddleware, upload.fields([{ name: "csvFile", maxCount
 
     const baseURL = normalizeBaseUrl(req.body.baseURL);
     const qrSize = parseQrSize(req.body.qrSize);
+    const placementX = parsePlacementX(req.body.placementX);
+    const placementY = parsePlacementY(req.body.placementY);
 
-    const csvBuffer = await fsp.readFile(csvUploadedPath);
-    const rows = parseCsvRows(csvBuffer);
-    if (rows.length === 0) {
-      throw new Error("有効なCSV行がありませんでした");
-    }
-
-    jobDir = path.join(TEMP_DIR, sanitizeFilename(`job-${Date.now()}-${crypto.randomUUID()}`));
-    const qrDir = path.join(jobDir, "qr");
-    const outDir = path.join(jobDir, "output");
-
-    await fsp.mkdir(qrDir, { recursive: true });
-    await fsp.mkdir(outDir, { recursive: true });
-
-    const generated = await Promise.all(
-      rows.map(async ({ id, text1, text2 }) => {
-        const url = `${baseURL}${id}`;
-        const safeId = sanitizeFilename(id);
-
-        const qrPath = path.join(qrDir, `qr_${safeId}.png`);
-        await QRCode.toFile(qrPath, url, {
-          width: qrSize,
-          margin: 1
-        });
-
-        const outputPdfPath = path.join(outDir, `output_${safeId}.pdf`);
-
-        await runPdfOverlayJob({
-          templatePdfPath: pdfUploadedPath,
-          qrPath,
-          outputPdfPath,
-          qrSize,
-          text1,
-          text2
-        });
-
-        return [{ absPath: outputPdfPath, zipName: `output_${safeId}.pdf` }];
-      })
-    );
-
-    const flattened = generated.flat();
-    if (flattened.length === 0) {
-      throw new Error("出力ファイルが生成されませんでした");
-    }
-
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename=qr_outputs_${Date.now()}.zip`);
-
-    const archive = archiver("zip", { zlib: { level: 9 } });
-    archive.on("error", (archiveError) => {
-      throw archiveError;
+    const jobId = `${Date.now()}-${crypto.randomUUID()}`;
+    const job = createJobRecord({
+      jobId,
+      baseURL,
+      qrSize,
+      placementX,
+      placementY,
+      csvUploadedPath,
+      pdfUploadedPath
     });
-    archive.pipe(res);
+    jobs.set(jobId, job);
 
-    for (const file of flattened) {
-      archive.file(file.absPath, { name: file.zipName });
-    }
+    runGenerateJob(jobId);
 
-    await archive.finalize();
+    res.status(202).json({
+      jobId,
+      message: "生成ジョブを開始しました"
+    });
   } catch (error) {
-    if (!res.headersSent) {
-      res.status(400).json({ error: error.message || "出力生成に失敗しました" });
-    }
-  } finally {
-    await removePathSafe(jobDir);
     await removePathSafe(csvUploadedPath);
     await removePathSafe(pdfUploadedPath);
+    res.status(400).json({ error: error.message || "ジョブ開始に失敗しました" });
   }
+});
+
+app.get("/generate/jobs/:jobId/status", authMiddleware, async (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+
+  if (!job) {
+    res.status(404).json({ error: "ジョブが見つかりません。期限切れの可能性があります" });
+    return;
+  }
+
+  res.json(buildStatusResponse(job));
+});
+
+app.get("/generate/jobs/:jobId/download", authMiddleware, async (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs.get(jobId);
+
+  if (!job) {
+    res.status(404).json({ error: "ジョブが見つかりません。期限切れの可能性があります" });
+    return;
+  }
+
+  if (job.state !== "completed") {
+    res.status(409).json({ error: "まだ生成が完了していません" });
+    return;
+  }
+
+  const zipExists = fs.existsSync(job.zipPath);
+  if (!zipExists) {
+    res.status(404).json({ error: "ZIPファイルが見つかりません" });
+    return;
+  }
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename=qr_outputs_${jobId}.zip`);
+  const stream = fs.createReadStream(job.zipPath);
+  stream.on("error", () => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "ZIPファイルの読み込みに失敗しました" });
+    }
+  });
+  stream.pipe(res);
+});
+
+app.post("/generate", authMiddleware, (_req, res) => {
+  res.status(410).json({ error: "このエンドポイントは廃止されました。/generate/jobs を使用してください" });
 });
 
 app.use((error, _req, res, _next) => {

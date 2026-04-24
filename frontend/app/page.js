@@ -5,6 +5,45 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const HORIZONTAL_OPTIONS = [
+  { value: "0", label: "左" },
+  { value: "1", label: "中央" },
+  { value: "2", label: "右" }
+];
+
+const VERTICAL_OPTIONS = [
+  { value: "0", label: "上1" },
+  { value: "1", label: "上2" },
+  { value: "2", label: "中央" },
+  { value: "3", label: "下2" },
+  { value: "4", label: "下1" }
+];
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readErrorMessage(response, fallbackMessage) {
+  const contentType = response.headers.get("content-type") || "";
+
+  if (contentType.includes("application/json")) {
+    const json = await response.json().catch(() => ({}));
+    if (json?.error) return String(json.error);
+  } else {
+    const text = await response.text().catch(() => "");
+    if (text.trim()) return text.trim();
+  }
+
+  return `${fallbackMessage} (HTTP ${response.status})`;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--:--";
+  const s = Math.round(seconds);
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
 
 export default function HomePage() {
   const router = useRouter();
@@ -12,12 +51,19 @@ export default function HomePage() {
 
   const [baseURL, setBaseURL] = useState("");
   const [qrSizeInput, setQrSizeInput] = useState("120");
+  const [placementX, setPlacementX] = useState("1");
+  const [placementY, setPlacementY] = useState("2");
   const [csvFile, setCsvFile] = useState(null);
   const [pdfFile, setPdfFile] = useState(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [jobId, setJobId] = useState("");
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressMessage, setProgressMessage] = useState("");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [etaSeconds, setEtaSeconds] = useState(null);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -26,6 +72,62 @@ export default function HomePage() {
   }, [loading, user, router]);
 
   const disabled = useMemo(() => submitting || loading || !user, [submitting, loading, user]);
+
+  async function downloadCompletedZip(token, activeJobId) {
+    const response = await fetch(`${API_URL}/generate/jobs/${activeJobId}/download`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    });
+
+    if (!response.ok) {
+      const err = await readErrorMessage(response, "ZIPのダウンロードに失敗しました");
+      throw new Error(err);
+    }
+
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `qr_outputs_${activeJobId}.zip`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(url);
+  }
+
+  async function pollJobUntilDone(token, activeJobId) {
+    while (true) {
+      const response = await fetch(`${API_URL}/generate/jobs/${activeJobId}/status`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const err = await readErrorMessage(response, "進捗の取得に失敗しました");
+        throw new Error(err);
+      }
+
+      const status = await response.json();
+      setProgressPercent(Number(status.progressPercent || 0));
+      setProgressMessage(String(status.message || "生成中"));
+      setElapsedSeconds(Number(status.elapsedSeconds || 0));
+      setEtaSeconds(Number.isFinite(status.etaSeconds) ? status.etaSeconds : null);
+
+      if (status.state === "completed") {
+        return;
+      }
+
+      if (status.state === "failed") {
+        throw new Error(status.error || "生成に失敗しました");
+      }
+
+      await wait(1000);
+    }
+  }
 
   async function handleGenerate(event) {
     event.preventDefault();
@@ -64,15 +166,22 @@ export default function HomePage() {
     }
 
     setSubmitting(true);
+    setJobId("");
+    setProgressPercent(0);
+    setProgressMessage("ジョブを開始しています");
+    setElapsedSeconds(0);
+    setEtaSeconds(null);
     try {
       const token = await user.getIdToken();
       const form = new FormData();
       form.append("baseURL", baseURL);
       form.append("qrSize", String(Math.round(parsedQrSize)));
+      form.append("placementX", placementX);
+      form.append("placementY", placementY);
       form.append("csvFile", csvFile);
       form.append("pdfFile", pdfFile);
 
-      const response = await fetch(`${API_URL}/generate`, {
+      const response = await fetch(`${API_URL}/generate/jobs`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`
@@ -81,23 +190,33 @@ export default function HomePage() {
       });
 
       if (!response.ok) {
-        const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.error || "生成に失敗しました");
+        const err = await readErrorMessage(response, "生成に失敗しました");
+        throw new Error(err);
       }
 
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = `qr_outputs_${Date.now()}.zip`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(url);
+      const json = await response.json().catch(() => ({}));
+      const activeJobId = String(json.jobId || "");
+      if (!activeJobId) {
+        throw new Error("ジョブIDの取得に失敗しました");
+      }
 
-      setSuccess("ZIPの生成が完了しました。");
+      setJobId(activeJobId);
+      setSuccess("生成ジョブを開始しました。進捗を表示しています。");
+
+      await pollJobUntilDone(token, activeJobId);
+      await downloadCompletedZip(token, activeJobId);
+      setProgressPercent(100);
+      setProgressMessage("生成が完了しました");
+      setEtaSeconds(0);
+
+      setSuccess("ZIPの生成が完了しました。ダウンロードを開始しました。");
     } catch (e) {
-      setError(e.message || "生成に失敗しました。");
+      const message = String(e?.message || "").trim();
+      if (message === "Failed to fetch") {
+        setError("APIサーバーに接続できません。frontend/.env.local の NEXT_PUBLIC_API_URL と backend の起動状態を確認してください。");
+      } else {
+        setError(message || "生成に失敗しました。");
+      }
     } finally {
       setSubmitting(false);
     }
@@ -164,6 +283,28 @@ export default function HomePage() {
           </label>
 
           <label>
+            文字+QRの横位置（3段階）
+            <select value={placementX} onChange={(e) => setPlacementX(e.target.value)}>
+              {HORIZONTAL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            文字+QRの縦位置（5段階）
+            <select value={placementY} onChange={(e) => setPlacementY(e.target.value)}>
+              {VERTICAL_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
             PDFテンプレート（.pdf）
             <input
               type="file"
@@ -176,8 +317,19 @@ export default function HomePage() {
           {error ? <div className="error-box">{error}</div> : null}
           {success ? <div className="success-box">{success}</div> : null}
 
+          {jobId ? (
+            <div className="panel" style={{ marginTop: 12, padding: 12 }}>
+              <div>ジョブID: {jobId}</div>
+              <div style={{ marginTop: 6 }}>{progressMessage || "生成中"}</div>
+              <progress style={{ width: "100%", marginTop: 8 }} value={progressPercent} max={100} />
+              <div style={{ marginTop: 6 }}>
+                進行度: {progressPercent}% / 経過時間: {formatDuration(elapsedSeconds)} / 予想残り時間: {formatDuration(etaSeconds)}
+              </div>
+            </div>
+          ) : null}
+
           <button type="submit" disabled={disabled}>
-            {submitting ? "生成中..." : "ZIPを生成する"}
+            {submitting ? "生成中（進捗表示中）..." : "ZIPを生成する"}
           </button>
         </form>
       </section>
