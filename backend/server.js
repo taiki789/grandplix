@@ -11,6 +11,8 @@ const crypto = require("crypto");
 const sanitizeFilename = require("sanitize-filename");
 const admin = require("firebase-admin");
 const { PDFDocument } = require("pdf-lib");
+const fontkit = require("@pdf-lib/fontkit");
+const { parse } = require("csv-parse/sync");
 
 const app = express();
 
@@ -20,6 +22,7 @@ const ROOT_DIR = __dirname;
 const UPLOAD_DIR = path.join(ROOT_DIR, "uploads");
 const TEMP_DIR = path.join(ROOT_DIR, "temp");
 const OUTPUT_DIR = path.join(ROOT_DIR, "output");
+const FONT_PATH = path.join(ROOT_DIR, "NotoSansJP-Regular.ttf");
 
 const MAX_IDS = 500;
 
@@ -73,54 +76,6 @@ try {
   console.warn("Firebase Adminの初期化をスキップしました:", error.message);
 }
 
-function parseIds(idsInput) {
-  const raw = String(idsInput || "").trim();
-  if (!raw) throw new Error("ids は必須です");
-
-  const set = new Set();
-  const chunks = raw.split(",").map((item) => item.trim()).filter(Boolean);
-
-  for (const chunk of chunks) {
-    if (/^\d+-\d+$/.test(chunk)) {
-      const [startRaw, endRaw] = chunk.split("-");
-      const start = Number(startRaw);
-      const end = Number(endRaw);
-
-      if (!Number.isInteger(start) || !Number.isInteger(end)) {
-        throw new Error(`範囲指定が不正です: ${chunk}`);
-      }
-
-      const min = Math.min(start, end);
-      const max = Math.max(start, end);
-
-      for (let value = min; value <= max; value += 1) {
-        if (value < 0) throw new Error("IDは0以上で指定してください");
-        set.add(value);
-        if (set.size > MAX_IDS) {
-          throw new Error(`ID数が多すぎます。上限は ${MAX_IDS} 件です`);
-        }
-      }
-      continue;
-    }
-
-    if (!/^\d+$/.test(chunk)) {
-      throw new Error(`ID形式が不正です: ${chunk}`);
-    }
-
-    const value = Number(chunk);
-    if (!Number.isInteger(value) || value < 0) {
-      throw new Error(`ID値が不正です: ${chunk}`);
-    }
-
-    set.add(value);
-    if (set.size > MAX_IDS) {
-      throw new Error(`ID数が多すぎます。上限は ${MAX_IDS} 件です`);
-    }
-  }
-
-  return Array.from(set).sort((a, b) => a - b);
-}
-
 function normalizeBaseUrl(baseURL) {
   const trimmed = String(baseURL || "").trim();
   if (!trimmed) {
@@ -151,69 +106,57 @@ async function removePathSafe(targetPath) {
 }
 
 function parseQrSize(value) {
-  const size = Number(value || 150);
+  const size = Number(value || 120);
   if (!Number.isFinite(size) || size < 16 || size > 2000) {
     throw new Error("qrSize は 16〜2000 の数値で指定してください");
   }
   return Math.round(size);
 }
 
-const QR_POSITIONS = new Set([
-  "top-left",
-  "top-center",
-  "top-right",
-  "center-left",
-  "center",
-  "center-right",
-  "bottom-left",
-  "bottom-center",
-  "bottom-right"
-]);
-
-function parseQrPosition(value) {
-  const position = String(value || "center").trim().toLowerCase();
-  if (!QR_POSITIONS.has(position)) {
-    throw new Error("qrPosition が不正です");
-  }
-  return position;
+function truncateText(value, maxLen = 20) {
+  const text = String(value || "").trim();
+  return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 
-function resolveQrCoordinates({ pageWidth, pageHeight, drawSize, qrPosition }) {
-  const margin = 20; // 余白（px）
-  const right = pageWidth - drawSize - margin;
-  const bottom = drawSize + margin;
-  const top = pageHeight - drawSize - margin;
-  const centerX = (pageWidth - drawSize) / 2;
-  const centerY = (pageHeight - drawSize) / 2;
+function parseCsvRows(csvBuffer) {
+  const rows = parse(csvBuffer, {
+    skip_empty_lines: true,
+    bom: true
+  });
 
-  switch (qrPosition) {
-    case "top-left":
-      return { x: margin, y: top };
-    case "top-center":
-      return { x: centerX, y: top };
-    case "top-right":
-      return { x: right, y: top };
-    case "center-left":
-      return { x: margin, y: centerY };
-    case "center-right":
-      return { x: right, y: centerY };
-    case "bottom-left":
-      return { x: margin, y: bottom };
-    case "bottom-center":
-      return { x: centerX, y: bottom };
-    case "bottom-right":
-      return { x: right, y: bottom };
-    case "center":
-    default:
-      return { x: centerX, y: centerY };
+  const normalized = [];
+  for (let idx = 0; idx < rows.length; idx += 1) {
+    // 1行目はヘッダーとしてスキップ
+    if (idx === 0) continue;
+
+    const row = rows[idx];
+    if (!Array.isArray(row) || row.length < 5) continue;
+
+    const id = String(row[0] || "").trim();
+    if (!id) continue;
+
+    normalized.push({
+      id,
+      text1: truncateText(row[1], 20),
+      text2: truncateText(row[4], 20)
+    });
+
+    if (normalized.length > MAX_IDS) {
+      throw new Error(`CSV件数が多すぎます。上限は ${MAX_IDS} 件です`);
+    }
   }
+
+  return normalized;
 }
 
-async function overlayQrOnPdf({ templatePdfPath, qrPath, outputPdfPath, qrSize, qrPosition }) {
+async function overlayQrAndTextOnPdf({ templatePdfPath, qrPath, outputPdfPath, qrSize, text1, text2 }) {
   const pdfBytes = await fsp.readFile(templatePdfPath);
   const qrBytes = await fsp.readFile(qrPath);
+  const fontBytes = fs.readFileSync(FONT_PATH);
 
   const pdfDoc = await PDFDocument.load(pdfBytes);
+  pdfDoc.registerFontkit(fontkit);
+  const font = await pdfDoc.embedFont(fontBytes);
   const pages = pdfDoc.getPages();
 
   if (pages.length === 0) {
@@ -224,19 +167,34 @@ async function overlayQrOnPdf({ templatePdfPath, qrPath, outputPdfPath, qrSize, 
   const { width, height } = page.getSize();
   const image = await pdfDoc.embedPng(qrBytes);
 
-  const drawSize = Math.min(Number(qrSize || 150), width, height);
-  const { x, y } = resolveQrCoordinates({
-    pageWidth: width,
-    pageHeight: height,
-    drawSize,
-    qrPosition
+  const drawSize = Math.min(Number(qrSize || 120), width, height);
+  const centerX = width / 2;
+  const centerY = height / 2;
+
+  const qrX = centerX - drawSize / 2;
+  const qrY = centerY - drawSize / 2;
+  const text1Y = qrY + drawSize + 25;
+  const text2Y = qrY + drawSize + 10;
+
+  const textSize = 12;
+
+  page.drawText(text1, {
+    x: centerX - font.widthOfTextAtSize(text1, textSize) / 2,
+    y: text1Y,
+    size: textSize,
+    font
   });
 
-  console.log(`[QR Overlay] position=${qrPosition}, size=${drawSize}, page=${width}x${height}, coordinates=${x},${y}`);
+  page.drawText(text2, {
+    x: centerX - font.widthOfTextAtSize(text2, textSize) / 2,
+    y: text2Y,
+    size: textSize,
+    font
+  });
 
   page.drawImage(image, {
-    x,
-    y,
+    x: qrX,
+    y: qrY,
     width: drawSize,
     height: drawSize
   });
@@ -247,7 +205,7 @@ async function overlayQrOnPdf({ templatePdfPath, qrPath, outputPdfPath, qrSize, 
 
 function verifyUploadExtension(file) {
   const ext = path.extname(file.originalname || "").toLowerCase();
-  return ext === ".pdf";
+  return ext === ".pdf" || ext === ".csv";
 }
 
 function createUploadStorage() {
@@ -273,13 +231,14 @@ const upload = multer({
   }
 });
 
-async function runPdfOverlayJob({ templatePdfPath, qrPath, outputPdfPath, qrSize, qrPosition }) {
-  await overlayQrOnPdf({
+async function runPdfOverlayJob({ templatePdfPath, qrPath, outputPdfPath, qrSize, text1, text2 }) {
+  await overlayQrAndTextOnPdf({
     templatePdfPath,
     qrPath,
     outputPdfPath,
     qrSize,
-    qrPosition
+    text1,
+    text2
   });
 }
 
@@ -310,25 +269,54 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/generate", authMiddleware, upload.single("file"), async (req, res) => {
+app.post("/generate", authMiddleware, upload.fields([{ name: "csvFile", maxCount: 1 }, { name: "pdfFile", maxCount: 1 }]), async (req, res) => {
   let jobDir;
-  let uploadedPath;
+  let csvUploadedPath;
+  let pdfUploadedPath;
 
   try {
-    if (!req.file) {
-      res.status(400).json({ error: "テンプレート PDF ファイルを指定してください" });
+    if (!fs.existsSync(FONT_PATH)) {
+      throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が backend フォルダにありません");
+    }
+
+    const fontStat = await fsp.stat(FONT_PATH);
+    if (!fontStat.size) {
+      throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が空です。実ファイルを配置してください");
+    }
+
+    const csvFile = req.files?.csvFile?.[0];
+    const pdfFile = req.files?.pdfFile?.[0];
+
+    if (!csvFile) {
+      res.status(400).json({ error: "CSVファイル（.csv）を指定してください" });
       return;
     }
 
-    uploadedPath = req.file.path;
-    if (!verifyUploadExtension(req.file)) {
-      throw new Error("拡張子が不正です。.pdf ファイルのみ許可されています");
+    if (!pdfFile) {
+      res.status(400).json({ error: "テンプレート PDF ファイル（.pdf）を指定してください" });
+      return;
+    }
+
+    csvUploadedPath = csvFile.path;
+    pdfUploadedPath = pdfFile.path;
+
+    if (!String(csvFile.originalname || "").toLowerCase().endsWith(".csv")) {
+      throw new Error("CSVファイルの拡張子が不正です。.csv のみ許可されています");
+    }
+
+    if (!String(pdfFile.originalname || "").toLowerCase().endsWith(".pdf")) {
+      throw new Error("PDFファイルの拡張子が不正です。.pdf のみ許可されています");
     }
 
     const baseURL = normalizeBaseUrl(req.body.baseURL);
-    const ids = parseIds(req.body.ids);
     const qrSize = parseQrSize(req.body.qrSize);
-    const qrPosition = parseQrPosition(req.body.qrPosition);
+
+    const csvBuffer = await fsp.readFile(csvUploadedPath);
+    const rows = parseCsvRows(csvBuffer);
+    if (rows.length === 0) {
+      throw new Error("有効なCSV行がありませんでした");
+    }
+
     jobDir = path.join(TEMP_DIR, sanitizeFilename(`job-${Date.now()}-${crypto.randomUUID()}`));
     const qrDir = path.join(jobDir, "qr");
     const outDir = path.join(jobDir, "output");
@@ -337,9 +325,8 @@ app.post("/generate", authMiddleware, upload.single("file"), async (req, res) =>
     await fsp.mkdir(outDir, { recursive: true });
 
     const generated = await Promise.all(
-      ids.map(async (idValue) => {
-        const id = String(idValue);
-        const url = `${baseURL}${id}/`;
+      rows.map(async ({ id, text1, text2 }) => {
+        const url = `${baseURL}${id}`;
         const safeId = sanitizeFilename(id);
 
         const qrPath = path.join(qrDir, `qr_${safeId}.png`);
@@ -351,11 +338,12 @@ app.post("/generate", authMiddleware, upload.single("file"), async (req, res) =>
         const outputPdfPath = path.join(outDir, `output_${safeId}.pdf`);
 
         await runPdfOverlayJob({
-          templatePdfPath: uploadedPath,
+          templatePdfPath: pdfUploadedPath,
           qrPath,
           outputPdfPath,
           qrSize,
-          qrPosition
+          text1,
+          text2
         });
 
         return [{ absPath: outputPdfPath, zipName: `output_${safeId}.pdf` }];
@@ -387,7 +375,8 @@ app.post("/generate", authMiddleware, upload.single("file"), async (req, res) =>
     }
   } finally {
     await removePathSafe(jobDir);
-    await removePathSafe(uploadedPath);
+    await removePathSafe(csvUploadedPath);
+    await removePathSafe(pdfUploadedPath);
   }
 });
 

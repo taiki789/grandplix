@@ -11,10 +11,9 @@ export default function HomePage() {
   const { user, loading, logout } = useAuth();
 
   const [baseURL, setBaseURL] = useState("");
-  const [ids, setIds] = useState("");
-  const [qrSizeInput, setQrSizeInput] = useState("150");
-  const [qrPosition, setQrPosition] = useState("center");
-  const [file, setFile] = useState(null);
+  const [qrSizeInput, setQrSizeInput] = useState("120");
+  const [csvFile, setCsvFile] = useState(null);
+  const [pdfFile, setPdfFile] = useState(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -33,12 +32,22 @@ export default function HomePage() {
     setError("");
     setSuccess("");
 
-    if (!file) {
+    if (!csvFile) {
+      setError("CSVファイル（.csv）を選択してください。");
+      return;
+    }
+
+    if (!csvFile.name.toLowerCase().endsWith(".csv")) {
+      setError(".csv ファイルのみアップロード可能です。");
+      return;
+    }
+
+    if (!pdfFile) {
       setError("PDFテンプレート（.pdf）を選択してください。");
       return;
     }
 
-    if (!file.name.toLowerCase().endsWith(".pdf")) {
+    if (!pdfFile.name.toLowerCase().endsWith(".pdf")) {
       setError(".pdf ファイルのみアップロード可能です。");
       return;
     }
@@ -48,13 +57,8 @@ export default function HomePage() {
       return;
     }
 
-    if (!ids.trim()) {
-      setError("IDを1つ以上入力してください。");
-      return;
-    }
-
-    const parsedQrSize = Number(qrSizeInput);
-    if (!qrSizeInput.trim() || !Number.isFinite(parsedQrSize) || parsedQrSize < 16 || parsedQrSize > 2000) {
+    const parsedQrSize = qrSizeInput.trim() ? Number(qrSizeInput) : 120;
+    if (!Number.isFinite(parsedQrSize) || parsedQrSize < 16 || parsedQrSize > 2000) {
       setError("QRサイズは16〜2000の数値で入力してください。");
       return;
     }
@@ -64,10 +68,9 @@ export default function HomePage() {
       const token = await user.getIdToken();
       const form = new FormData();
       form.append("baseURL", baseURL);
-      form.append("ids", ids);
       form.append("qrSize", String(Math.round(parsedQrSize)));
-      form.append("qrPosition", qrPosition);
-      form.append("file", file);
+      form.append("csvFile", csvFile);
+      form.append("pdfFile", pdfFile);
 
       const response = await fetch(`${API_URL}/generate`, {
         method: "POST",
@@ -118,7 +121,7 @@ export default function HomePage() {
 
       <section className="panel">
         <p>
-          ベースURL、ID（カンマ区切り/範囲指定）、QRサイズ、PDFテンプレートを入力して、
+          CSVファイル、PDFテンプレート、ベースURLを入力して、
           PDF出力を一括生成します。
         </p>
 
@@ -135,12 +138,11 @@ export default function HomePage() {
           </label>
 
           <label>
-            ID入力（カンマ区切り/範囲指定）
+            CSVファイル（.csv）
             <input
-              type="text"
-              value={ids}
-              onChange={(e) => setIds(e.target.value)}
-              placeholder="101,102,103 または 100-120"
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
               required
             />
           </label>
@@ -155,28 +157,10 @@ export default function HomePage() {
               onChange={(e) => setQrSizeInput(e.target.value)}
               onBlur={() => {
                 if (!qrSizeInput.trim()) {
-                  setQrSizeInput("150");
+                  setQrSizeInput("120");
                 }
               }}
             />
-          </label>
-
-          <label>
-            QR配置位置
-            <select
-              value={qrPosition}
-              onChange={(e) => setQrPosition(e.target.value)}
-            >
-              <option value="top-left">左上</option>
-              <option value="top-center">上中央</option>
-              <option value="top-right">右上</option>
-              <option value="center-left">左中央</option>
-              <option value="center">中央</option>
-              <option value="center-right">右中央</option>
-              <option value="bottom-left">左下</option>
-              <option value="bottom-center">下中央</option>
-              <option value="bottom-right">右下</option>
-            </select>
           </label>
 
           <label>
@@ -184,7 +168,7 @@ export default function HomePage() {
             <input
               type="file"
               accept=".pdf"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              onChange={(e) => setPdfFile(e.target.files?.[0] || null)}
               required
             />
           </label>
