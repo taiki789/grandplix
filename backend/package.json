@@ -1,0 +1,21 @@
+{
+  "name": "grandplix-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.3.0",
+    "multer": "^1.4.5-lts.2",
+    "pdf-lib": "^1.17.1",
+    "qrcode": "^1.5.4",
+    "sanitize-filename": "^1.6.3"
+  }
+}

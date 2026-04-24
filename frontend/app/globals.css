@@ -1,0 +1,169 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  --bg: #f4efe4;
+  --bg-accent: #e5dfcf;
+  --surface: #fffdf8;
+  --ink: #1d1c19;
+  --muted: #5f5b50;
+  --line: #d0cab9;
+  --primary: #00473a;
+  --primary-hover: #006350;
+  --danger-bg: #f7d5d2;
+  --danger-ink: #6b1912;
+  --success-bg: #d9f0dc;
+  --success-ink: #0f4a21;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  color: var(--ink);
+  font-family: "Space Grotesk", sans-serif;
+  background:
+    radial-gradient(circle at 10% 10%, #fff7e7 0, rgba(255, 247, 231, 0) 38%),
+    radial-gradient(circle at 90% 90%, #d6ecdf 0, rgba(214, 236, 223, 0) 42%),
+    linear-gradient(135deg, var(--bg), var(--bg-accent));
+}
+
+.centered {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-size: 1.1rem;
+}
+
+.auth-page,
+.app-page {
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.auth-card,
+.panel {
+  width: min(840px, 100%);
+  margin: 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 24px;
+  background: color-mix(in srgb, var(--surface) 90%, white 10%);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.08);
+}
+
+.topbar {
+  width: min(1000px, 100%);
+  margin: 0 auto 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.topbar h1 {
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+.account-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.form-grid {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+input[type="email"],
+input[type="password"],
+input[type="url"],
+input[type="text"],
+input[type="number"],
+input[type="file"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
+}
+
+button {
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 16px;
+  background: var(--primary);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+button:hover {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: wait;
+  transform: none;
+}
+
+.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.error-box,
+.success-box {
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.error-box {
+  background: var(--danger-bg);
+  color: var(--danger-ink);
+}
+
+.success-box {
+  background: var(--success-bg);
+  color: var(--success-ink);
+}
+
+@media (max-width: 640px) {
+  .auth-page,
+  .app-page {
+    padding: 14px;
+  }
+
+  .auth-card,
+  .panel {
+    border-radius: 16px;
+    padding: 16px;
+  }
+}

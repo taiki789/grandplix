@@ -1,0 +1,14 @@
+node_modules/
+.next/
+dist/
+coverage/
+
+frontend/.env.local
+backend/.env
+
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/temp/*
+!backend/temp/.gitkeep
+backend/output/*
+!backend/output/.gitkeep
