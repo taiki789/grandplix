@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { getFirebaseAuth } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 
 export default function LoginPage() {
@@ -32,6 +32,7 @@ export default function LoginPage() {
 
     setSubmitting(true);
     try {
+      const auth = getFirebaseAuth();
       if (mode === "register") {
         await createUserWithEmailAndPassword(auth, email, password);
       } else {
