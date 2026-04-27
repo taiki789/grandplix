@@ -60,6 +60,19 @@ function formatDuration(seconds) {
   return `${mm}:${ss}`;
 }
 
+async function fetchApi(path, options) {
+  try {
+    return await fetch(`${API_URL}${path}`, options);
+  } catch (error) {
+    const isProduction = process.env.NODE_ENV === "production";
+    if (!isProduction || API_URL === "/api") {
+      throw error;
+    }
+
+    return fetch(`/api${path}`, options);
+  }
+}
+
 export default function HomePage() {
   const router = useRouter();
   const { user, loading, logout } = useAuth();
@@ -89,7 +102,7 @@ export default function HomePage() {
   const disabled = useMemo(() => submitting || loading || !user, [submitting, loading, user]);
 
   async function downloadCompletedZip(token, activeJobId) {
-    const response = await fetch(`${API_URL}/generate/jobs/${activeJobId}/download`, {
+    const response = await fetchApi(`/generate/jobs/${activeJobId}/download`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${token}`
@@ -114,7 +127,7 @@ export default function HomePage() {
 
   async function pollJobUntilDone(token, activeJobId) {
     while (true) {
-      const response = await fetch(`${API_URL}/generate/jobs/${activeJobId}/status`, {
+      const response = await fetchApi(`/generate/jobs/${activeJobId}/status`, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`
@@ -196,7 +209,7 @@ export default function HomePage() {
       form.append("csvFile", csvFile);
       form.append("pdfFile", pdfFile);
 
-      const response = await fetch(`${API_URL}/generate/jobs`, {
+      const response = await fetchApi("/generate/jobs", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`
