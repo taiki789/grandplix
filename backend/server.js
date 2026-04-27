@@ -13,6 +13,7 @@ const admin = require("firebase-admin");
 const { PDFDocument } = require("pdf-lib");
 const fontkit = require("@pdf-lib/fontkit");
 const { parse } = require("csv-parse/sync");
+const { PassThrough } = require("stream");
 
 const app = express();
 
@@ -463,11 +464,16 @@ function buildStatusResponse(job) {
 }
 
 async function createZipFromBufferEntries({ zipPath, entries }) {
-  await new Promise((resolve, reject) => {
-    const output = fs.createWriteStream(zipPath);
+  return new Promise((resolve, reject) => {
+    const output = zipPath ? fs.createWriteStream(zipPath) : new PassThrough();
     const archive = archiver("zip", { zlib: { level: 1 } });
+    const chunks = [];
 
-    output.on("close", () => resolve());
+    output.on("data", (chunk) => {
+      if (!zipPath) chunks.push(chunk);
+    });
+    output.on("close", () => resolve(zipPath ? null : Buffer.concat(chunks)));
+    output.on("end", () => resolve(zipPath ? null : Buffer.concat(chunks)));
     output.on("error", reject);
     archive.on("error", reject);
 
@@ -557,6 +563,43 @@ async function runGenerateJob(jobId) {
   }
 }
 
+async function buildZipEntries({ rows, templatePdfBytes, fontBytes, baseURL, qrSize, placementX, placementY, onProgress }) {
+  const zipEntries = [];
+
+  for (const { id, text1, text2 } of rows) {
+    const url = `${baseURL}${id}`;
+    const safeId = sanitizeFilename(id);
+
+    const qrBytes = await QRCode.toBuffer(url, {
+      type: "png",
+      width: qrSize,
+      margin: 1
+    });
+
+    const outputBytes = await overlayQrAndTextOnPdf({
+      templatePdfBytes,
+      qrBytes,
+      qrSize,
+      text1,
+      text2,
+      placementX,
+      placementY,
+      fontBytes
+    });
+
+    zipEntries.push({
+      name: `output_${safeId}.pdf`,
+      content: Buffer.from(outputBytes)
+    });
+
+    if (typeof onProgress === "function") {
+      onProgress();
+    }
+  }
+
+  return zipEntries;
+}
+
 async function authMiddleware(req, res, next) {
   try {
     if (!firebaseInitialized) {
@@ -630,6 +673,40 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
     const qrSize = parseQrSize(req.body.qrSize);
     const placementX = parsePlacementX(req.body.placementX);
     const placementY = parsePlacementY(req.body.placementY);
+
+    if (IS_VERCEL) {
+      const fontPath = await ensureFontReady();
+      const [csvBuffer, templatePdfBytes, fontBytes] = await Promise.all([
+        fsp.readFile(csvUploadedPath),
+        fsp.readFile(pdfUploadedPath),
+        fsp.readFile(fontPath)
+      ]);
+
+      const rows = parseCsvRows(csvBuffer);
+      if (rows.length === 0) {
+        throw new Error("有効なCSV行がありませんでした");
+      }
+
+      const zipEntries = await buildZipEntries({
+        rows,
+        templatePdfBytes,
+        fontBytes,
+        baseURL,
+        qrSize,
+        placementX,
+        placementY
+      });
+
+      const zipBuffer = await createZipFromBufferEntries({ entries: zipEntries });
+      await removePathSafe(csvUploadedPath);
+      await removePathSafe(pdfUploadedPath);
+
+      const inlineJobId = `${Date.now()}-${crypto.randomUUID()}`;
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename=qr_outputs_${inlineJobId}.zip`);
+      res.status(200).send(zipBuffer);
+      return;
+    }
 
     const jobId = `${Date.now()}-${crypto.randomUUID()}`;
     const job = createJobRecord({

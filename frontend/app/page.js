@@ -60,6 +60,19 @@ function formatDuration(seconds) {
   return `${mm}:${ss}`;
 }
 
+function pickDownloadFilename(contentDisposition, fallback) {
+  const header = String(contentDisposition || "");
+  const match = header.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+  const encoded = match?.[1] || match?.[2];
+  if (!encoded) return fallback;
+
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return encoded;
+  }
+}
+
 async function fetchApi(path, options) {
   try {
     return await fetch(`${API_URL}${path}`, options);
@@ -220,6 +233,28 @@ export default function HomePage() {
       if (!response.ok) {
         const err = await readErrorMessage(response, "生成に失敗しました");
         throw new Error(err);
+      }
+
+      const contentType = response.headers.get("content-type") || "";
+      if (contentType.includes("application/zip")) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = pickDownloadFilename(
+          response.headers.get("content-disposition"),
+          `qr_outputs_${Date.now()}.zip`
+        );
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        window.URL.revokeObjectURL(url);
+
+        setProgressPercent(100);
+        setProgressMessage("生成が完了しました");
+        setEtaSeconds(0);
+        setSuccess("ZIPの生成が完了しました。ダウンロードを開始しました。");
+        return;
       }
 
       const json = await response.json().catch(() => ({}));
