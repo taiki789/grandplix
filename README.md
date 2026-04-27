@@ -8,7 +8,7 @@
 
 ## 1. できること
 
-- CSV の各行ごとに 1 つの PDF を生成
+- 複数CSVを同時アップロードし、各行ごとに 1 つの PDF を生成
 - QRコード + テキスト2行を PDF 上に配置
 - 配置は「横3段階 × 縦5段階」で指定可能
 - QRサイズ指定可能
@@ -100,7 +100,7 @@ npm run dev:backend
 1. ベースURLを入力
 - 例: `https://example.com/search/`
 
-2. CSVファイル（`.csv`）を選択
+2. CSVファイル（`.csv`）を1つ以上選択
 
 3. QRサイズ（px）を入力
 - 許容範囲: 16 〜 2000
@@ -129,22 +129,23 @@ npm run dev:backend
 
 - 1行目はヘッダーとしてスキップ
 - 2行目以降をデータとして処理
-- 最低 5 列必要
+- 列順（推奨）:
+  - `number, pamphlet_id, group_name, group_kana, project_name, place, grandPrix, grandPrixPR`
 - 使用列:
-  - 1列目: `id`（必須）
-  - 2列目: `text1`（最大20文字に切り詰め）
-  - 5列目: `text2`（最大20文字に切り詰め）
+  - `pamphlet_id`（必須 / URL末尾ID）
+  - `group_name`（QR上1行目 / 最大20文字）
+  - `project_name`（QR上2行目 / 最大20文字）
 - 上限件数: 500 行
 
 ### サンプル
 
 ```csv
-id,text1,col3,col4,text2
-1001,見本1,xx,yy,説明1
-1002,見本2,xx,yy,説明2
+number,pamphlet_id,group_name,group_kana,project_name,place,grandPrix,grandPrixPR
+1,1001,見本団体,みほんだんたい,見本企画,体育館,yes,PR文
+2,1002,テスト団体,てすとだんたい,テスト企画,中庭,no,PR文
 ```
 
-生成URLは `ベースURL + id` です。
+生成URLは `ベースURL + pamphlet_id` です。
 
 ## 7. 出力仕様
 
@@ -156,7 +157,7 @@ id,text1,col3,col4,text2
 
 ## 8. 主なエラーと対処
 
-### 「Cannot POST /generate/jobs」
+### 「Cannot POST /generate」
 
 原因:
 - 古いバックエンドが起動中
@@ -185,19 +186,19 @@ id,text1,col3,col4,text2
 
 対処:
 - バックエンドログで ZIP 作成エラー有無を確認
-- ジョブ状態 API (`/generate/jobs/:jobId/status`) の `state` を確認
+- ジョブ状態 API (`/status?id=<jobId>`) の `state` を確認
 
 ## 9. API概要
 
-- `POST /generate/jobs`
-  - 入力: `baseURL`, `qrSize`, `placementX`, `placementY`, `csvFile`, `pdfFile`
+- `POST /generate`
+  - 入力: `baseURL`, `qrSize`, `placementX`, `placementY`, `csvFiles[]`, `pdfFile`
   - 認証: `Authorization: Bearer <Firebase ID Token>`
   - 出力: ジョブ開始情報（jobId）
 
-- `GET /generate/jobs/:jobId/status`
+- `GET /status?id=<jobId>`
   - ジョブ進捗取得
 
-- `GET /generate/jobs/:jobId/download`
+- `GET /download?id=<jobId>`
   - 完了済み ZIP ダウンロード
 
 ## 10. 運用メモ

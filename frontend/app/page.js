@@ -99,7 +99,7 @@ export default function HomePage() {
   const [qrSizeInput, setQrSizeInput] = useState("120");
   const [placementX, setPlacementX] = useState("1");
   const [placementY, setPlacementY] = useState("2");
-  const [csvFile, setCsvFile] = useState(null);
+  const [csvFiles, setCsvFiles] = useState([]);
   const [pdfFile, setPdfFile] = useState(null);
 
   const [submitting, setSubmitting] = useState(false);
@@ -119,8 +119,22 @@ export default function HomePage() {
 
   const disabled = useMemo(() => submitting || loading || !user, [submitting, loading, user]);
 
+  async function fetchApiWithRetry(path, options, retries = 2) {
+    let attempt = 0;
+    // Retry on network errors only.
+    while (true) {
+      try {
+        return await fetchApi(path, options);
+      } catch (error) {
+        if (attempt >= retries) throw error;
+        attempt += 1;
+        await wait(400 * attempt);
+      }
+    }
+  }
+
   async function downloadCompletedZip(token, activeJobId) {
-    const response = await fetchApi(`/generate/jobs/${activeJobId}/download`, {
+    const response = await fetchApiWithRetry(`/download?id=${encodeURIComponent(activeJobId)}`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${token}`
@@ -145,7 +159,7 @@ export default function HomePage() {
 
   async function pollJobUntilDone(token, activeJobId) {
     while (true) {
-      const response = await fetchApi(`/generate/jobs/${activeJobId}/status`, {
+      const response = await fetchApiWithRetry(`/status?id=${encodeURIComponent(activeJobId)}`, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${token}`
@@ -180,14 +194,16 @@ export default function HomePage() {
     setError("");
     setSuccess("");
 
-    if (!csvFile) {
-      setError("CSVファイル（.csv）を選択してください。");
+    if (!Array.isArray(csvFiles) || csvFiles.length === 0) {
+      setError("CSVファイル（.csv）を1つ以上選択してください。");
       return;
     }
 
-    if (!csvFile.name.toLowerCase().endsWith(".csv")) {
-      setError(".csv ファイルのみアップロード可能です。");
-      return;
+    for (const file of csvFiles) {
+      if (!String(file?.name || "").toLowerCase().endsWith(".csv")) {
+        setError(".csv ファイルのみアップロード可能です。");
+        return;
+      }
     }
 
     if (!pdfFile) {
@@ -201,7 +217,8 @@ export default function HomePage() {
     }
 
     if (isLikelyVercelSameOriginApi()) {
-      const uploadBytes = Number(csvFile?.size || 0) + Number(pdfFile?.size || 0);
+      const csvTotalBytes = csvFiles.reduce((sum, file) => sum + Number(file?.size || 0), 0);
+      const uploadBytes = csvTotalBytes + Number(pdfFile?.size || 0);
       if (uploadBytes > VERCEL_SAFE_UPLOAD_LIMIT_BYTES) {
         setError("Vercel のリクエストサイズ上限を超える可能性があります。CSV+PDF 合計を約4MB以下にしてください。大きいファイルはローカル実行か別バックエンドをご利用ください。");
         return;
@@ -232,10 +249,12 @@ export default function HomePage() {
       form.append("qrSize", String(Math.round(parsedQrSize)));
       form.append("placementX", placementX);
       form.append("placementY", placementY);
-      form.append("csvFile", csvFile);
+      for (const file of csvFiles) {
+        form.append("csvFiles", file);
+      }
       form.append("pdfFile", pdfFile);
 
-      const response = await fetchApi("/generate/jobs", {
+      const response = await fetchApiWithRetry("/generate", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`
@@ -337,7 +356,8 @@ export default function HomePage() {
             <input
               type="file"
               accept=".csv,text/csv"
-              onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
+              multiple
+              onChange={(e) => setCsvFiles(Array.from(e.target.files || []))}
               required
             />
           </label>

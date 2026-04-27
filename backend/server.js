@@ -173,7 +173,7 @@ function safeNowIso() {
   return new Date().toISOString();
 }
 
-function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUploadedPath, pdfUploadedPath }) {
+function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUploadedPaths, pdfUploadedPath }) {
   const jobDir = path.join(TEMP_DIR, sanitizeFilename(`job-${jobId}`));
   const zipPath = path.join(jobDir, `qr_outputs_${jobId}.zip`);
   return {
@@ -185,7 +185,7 @@ function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUp
     qrSize,
     placementX,
     placementY,
-    csvUploadedPath,
+    csvUploadedPaths,
     pdfUploadedPath,
     jobDir,
     zipPath,
@@ -227,7 +227,9 @@ function scheduleJobCleanup(jobId) {
     const job = jobs.get(jobId);
     if (!job) return;
     await removePathSafe(job.jobDir);
-    await removePathSafe(job.csvUploadedPath);
+    for (const csvPath of job.csvUploadedPaths || []) {
+      await removePathSafe(csvPath);
+    }
     await removePathSafe(job.pdfUploadedPath);
     jobs.delete(jobId);
   }, JOB_TTL_MS);
@@ -279,35 +281,52 @@ function truncateText(value, maxLen = 20) {
   return text.length > maxLen ? text.slice(0, maxLen) : text;
 }
 
-function parseCsvRows(csvBuffer) {
+function parseCsvRowsFromFile(csvBuffer, fileLabel) {
   const rows = parse(csvBuffer, {
+    columns: true,
     skip_empty_lines: true,
-    bom: true
+    bom: true,
+    trim: true
   });
 
   const normalized = [];
+  const requiredColumns = ["pamphlet_id", "group_name", "project_name"];
+
   for (let idx = 0; idx < rows.length; idx += 1) {
-    // 1行目はヘッダーとしてスキップ
-    if (idx === 0) continue;
+    const row = rows[idx] || {};
+    if (idx === 0) {
+      const keys = Object.keys(row);
+      const missing = requiredColumns.filter((k) => !keys.includes(k));
+      if (missing.length > 0) {
+        throw new Error(`CSV列不足 (${fileLabel}): ${missing.join(", ")}`);
+      }
+    }
 
-    const row = rows[idx];
-    if (!Array.isArray(row) || row.length < 5) continue;
-
-    const id = String(row[0] || "").trim();
+    const id = String(row.pamphlet_id || "").trim();
     if (!id) continue;
 
     normalized.push({
       id,
-      text1: truncateText(row[1], 20),
-      text2: truncateText(row[4], 20)
+      text1: truncateText(row.group_name, 20),
+      text2: truncateText(row.project_name, 20)
     });
+  }
 
-    if (normalized.length > MAX_IDS) {
+  return normalized;
+}
+
+function collectRowsFromCsvFiles(csvFiles) {
+  const merged = [];
+
+  for (const csvFile of csvFiles) {
+    const rows = parseCsvRowsFromFile(csvFile.buffer, csvFile.name || "unknown.csv");
+    merged.push(...rows);
+    if (merged.length > MAX_IDS) {
       throw new Error(`CSV件数が多すぎます。上限は ${MAX_IDS} 件です`);
     }
   }
 
-  return normalized;
+  return merged;
 }
 
 async function ensureFontReady() {
@@ -496,13 +515,17 @@ async function runGenerateJob(jobId) {
     job.state = "running";
     job.message = "CSVを解析しています";
 
-    const [csvBuffer, templatePdfBytes, fontBytes] = await Promise.all([
-      fsp.readFile(job.csvUploadedPath),
+    const [templatePdfBytes, fontBytes] = await Promise.all([
       fsp.readFile(job.pdfUploadedPath),
       fsp.readFile(fontPath)
     ]);
 
-    const rows = parseCsvRows(csvBuffer);
+    const csvBuffers = await Promise.all((job.csvUploadedPaths || []).map(async (csvPath) => ({
+      name: path.basename(csvPath),
+      buffer: await fsp.readFile(csvPath)
+    })));
+
+    const rows = collectRowsFromCsvFiles(csvBuffers);
     if (rows.length === 0) {
       throw new Error("有効なCSV行がありませんでした");
     }
@@ -558,7 +581,9 @@ async function runGenerateJob(jobId) {
     job.message = "生成に失敗しました";
     job.finishedAt = safeNowIso();
   } finally {
-    await removePathSafe(job.csvUploadedPath);
+    for (const csvPath of job.csvUploadedPaths || []) {
+      await removePathSafe(csvPath);
+    }
     await removePathSafe(job.pdfUploadedPath);
     scheduleJobCleanup(jobId);
   }
@@ -631,21 +656,23 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", maxCount: 1 }, { name: "pdfFile", maxCount: 1 }]), async (req, res) => {
-  let csvUploadedPath;
+async function handleGenerateRequest(req, res) {
+  let csvUploadedPaths = [];
   let pdfUploadedPath;
 
   try {
-    const csvFile = req.files?.csvFile?.[0];
+    const csvFiles = req.files?.csvFiles || req.files?.csvFile || [];
     const pdfFile = req.files?.pdfFile?.[0];
 
-    if (!csvFile) {
-      res.status(400).json({ error: "CSVファイル（.csv）を指定してください" });
+    if (!Array.isArray(csvFiles) || csvFiles.length === 0) {
+      res.status(400).json({ error: "CSVファイル（.csv）を1つ以上指定してください" });
       return;
     }
 
     if (!pdfFile) {
-      await removePathSafe(csvFile.path);
+      for (const file of csvFiles) {
+        await removePathSafe(file.path);
+      }
       res.status(400).json({ error: "テンプレート PDF ファイル（.pdf）を指定してください" });
       return;
     }
@@ -653,17 +680,21 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
     try {
       await ensureFontReady();
     } catch (error) {
-      await removePathSafe(csvFile.path);
+      for (const file of csvFiles) {
+        await removePathSafe(file.path);
+      }
       await removePathSafe(pdfFile.path);
       res.status(500).json({ error: error.message || "日本語フォントファイルの読み込みに失敗しました" });
       return;
     }
 
-    csvUploadedPath = csvFile.path;
+    csvUploadedPaths = csvFiles.map((f) => f.path);
     pdfUploadedPath = pdfFile.path;
 
-    if (!String(csvFile.originalname || "").toLowerCase().endsWith(".csv")) {
-      throw new Error("CSVファイルの拡張子が不正です。.csv のみ許可されています");
+    for (const csvFile of csvFiles) {
+      if (!String(csvFile.originalname || "").toLowerCase().endsWith(".csv")) {
+        throw new Error("CSVファイルの拡張子が不正です。.csv のみ許可されています");
+      }
     }
 
     if (!String(pdfFile.originalname || "").toLowerCase().endsWith(".pdf")) {
@@ -677,13 +708,17 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
 
     if (IS_VERCEL) {
       const fontPath = await ensureFontReady();
-      const [csvBuffer, templatePdfBytes, fontBytes] = await Promise.all([
-        fsp.readFile(csvUploadedPath),
+      const [templatePdfBytes, fontBytes] = await Promise.all([
         fsp.readFile(pdfUploadedPath),
         fsp.readFile(fontPath)
       ]);
 
-      const rows = parseCsvRows(csvBuffer);
+      const csvBuffers = await Promise.all(csvFiles.map(async (file) => ({
+        name: file.originalname,
+        buffer: await fsp.readFile(file.path)
+      })));
+
+      const rows = collectRowsFromCsvFiles(csvBuffers);
       if (rows.length === 0) {
         throw new Error("有効なCSV行がありませんでした");
       }
@@ -703,7 +738,9 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
       });
 
       const zipBuffer = await createZipFromBufferEntries({ entries: zipEntries });
-      await removePathSafe(csvUploadedPath);
+      for (const csvPath of csvUploadedPaths) {
+        await removePathSafe(csvPath);
+      }
       await removePathSafe(pdfUploadedPath);
 
       const inlineJobId = `${Date.now()}-${crypto.randomUUID()}`;
@@ -720,7 +757,7 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
       qrSize,
       placementX,
       placementY,
-      csvUploadedPath,
+      csvUploadedPaths,
       pdfUploadedPath
     });
     jobs.set(jobId, job);
@@ -732,14 +769,24 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
       message: "生成ジョブを開始しました"
     });
   } catch (error) {
-    await removePathSafe(csvUploadedPath);
+    for (const csvPath of csvUploadedPaths) {
+      await removePathSafe(csvPath);
+    }
     await removePathSafe(pdfUploadedPath);
     res.status(400).json({ error: error.message || "ジョブ開始に失敗しました" });
   }
-});
+}
 
-app.get("/generate/jobs/:jobId/status", authMiddleware, async (req, res) => {
-  const { jobId } = req.params;
+const generateUpload = upload.fields([{ name: "csvFiles", maxCount: 20 }, { name: "csvFile", maxCount: 20 }, { name: "pdfFile", maxCount: 1 }]);
+app.post("/generate", authMiddleware, generateUpload, handleGenerateRequest);
+app.post("/generate/jobs", authMiddleware, generateUpload, handleGenerateRequest);
+
+function resolveJobIdFromRequest(req) {
+  return String(req.params?.jobId || req.query?.id || "").trim();
+}
+
+function sendJobStatus(req, res) {
+  const jobId = resolveJobIdFromRequest(req);
   const job = jobs.get(jobId);
 
   if (!job) {
@@ -748,10 +795,13 @@ app.get("/generate/jobs/:jobId/status", authMiddleware, async (req, res) => {
   }
 
   res.json(buildStatusResponse(job));
-});
+}
 
-app.get("/generate/jobs/:jobId/download", authMiddleware, async (req, res) => {
-  const { jobId } = req.params;
+app.get("/generate/jobs/:jobId/status", authMiddleware, sendJobStatus);
+app.get("/status", authMiddleware, sendJobStatus);
+
+function sendJobDownload(req, res) {
+  const jobId = resolveJobIdFromRequest(req);
   const job = jobs.get(jobId);
 
   if (!job) {
@@ -779,11 +829,10 @@ app.get("/generate/jobs/:jobId/download", authMiddleware, async (req, res) => {
     }
   });
   stream.pipe(res);
-});
+}
 
-app.post("/generate", authMiddleware, (_req, res) => {
-  res.status(410).json({ error: "このエンドポイントは廃止されました。/generate/jobs を使用してください" });
-});
+app.get("/generate/jobs/:jobId/download", authMiddleware, sendJobDownload);
+app.get("/download", authMiddleware, sendJobDownload);
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
