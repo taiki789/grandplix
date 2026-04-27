@@ -25,7 +25,7 @@ const ROOT_DIR = __dirname;
 const UPLOAD_DIR = path.join(RUNTIME_DIR, "uploads");
 const TEMP_DIR = path.join(RUNTIME_DIR, "temp");
 const OUTPUT_DIR = path.join(RUNTIME_DIR, "output");
-const FONT_PATH = path.join(ROOT_DIR, "NotoSansJP-Regular.ttf");
+const FONT_FILE_NAME = "NotoSansJP-Regular.ttf";
 const JOB_CONCURRENCY = Math.max(1, Number(process.env.JOB_CONCURRENCY || 4));
 const JOB_TTL_MS = Math.max(60_000, Number(process.env.JOB_TTL_MS || 10 * 60 * 1000));
 const DEFAULT_PLACEMENT_X = 1;
@@ -312,14 +312,28 @@ function parseCsvRows(csvBuffer) {
 }
 
 async function ensureFontReady() {
-  if (!fs.existsSync(FONT_PATH)) {
-    throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が backend フォルダにありません");
+  const cwd = process.cwd();
+  const envFontPath = String(process.env.FONT_PATH || "").trim();
+  const candidates = [
+    envFontPath,
+    path.join(ROOT_DIR, FONT_FILE_NAME),
+    path.join(cwd, "backend", FONT_FILE_NAME),
+    path.join(cwd, "..", "backend", FONT_FILE_NAME),
+    path.join("/var/task/backend", FONT_FILE_NAME),
+    path.join("/var/task", FONT_FILE_NAME)
+  ].filter(Boolean);
+
+  const foundPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!foundPath) {
+    throw new Error(`日本語フォントファイル ${FONT_FILE_NAME} が見つかりません。候補: ${candidates.join(" | ")}`);
   }
 
-  const fontStat = await fsp.stat(FONT_PATH);
+  const fontStat = await fsp.stat(foundPath);
   if (!fontStat.size) {
-    throw new Error("日本語フォントファイル NotoSansJP-Regular.ttf が空です。実ファイルを配置してください");
+    throw new Error(`日本語フォントファイル ${FONT_FILE_NAME} が空です。実ファイルを配置してください`);
   }
+
+  return foundPath;
 }
 
 function resolveBlockPosition({ placementX, placementY, pageWidth, pageHeight, blockWidth, blockHeight, margin = 24 }) {
@@ -471,7 +485,7 @@ async function runGenerateJob(jobId) {
   if (!job) return;
 
   try {
-    await ensureFontReady();
+    const fontPath = await ensureFontReady();
 
     job.state = "running";
     job.message = "CSVを解析しています";
@@ -479,7 +493,7 @@ async function runGenerateJob(jobId) {
     const [csvBuffer, templatePdfBytes, fontBytes] = await Promise.all([
       fsp.readFile(job.csvUploadedPath),
       fsp.readFile(job.pdfUploadedPath),
-      fsp.readFile(FONT_PATH)
+      fsp.readFile(fontPath)
     ]);
 
     const rows = parseCsvRows(csvBuffer);
