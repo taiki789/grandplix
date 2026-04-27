@@ -33,6 +33,7 @@ const VERTICAL_OPTIONS = [
   { value: "3", label: "下2" },
   { value: "4", label: "下1" }
 ];
+const VERCEL_SAFE_UPLOAD_LIMIT_BYTES = 4 * 1024 * 1024;
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,6 +59,10 @@ function formatDuration(seconds) {
   const mm = String(Math.floor(s / 60)).padStart(2, "0");
   const ss = String(s % 60).padStart(2, "0");
   return `${mm}:${ss}`;
+}
+
+function isLikelyVercelSameOriginApi() {
+  return process.env.NODE_ENV === "production" && API_URL === "/api";
 }
 
 function pickDownloadFilename(contentDisposition, fallback) {
@@ -193,6 +198,14 @@ export default function HomePage() {
     if (!pdfFile.name.toLowerCase().endsWith(".pdf")) {
       setError(".pdf ファイルのみアップロード可能です。");
       return;
+    }
+
+    if (isLikelyVercelSameOriginApi()) {
+      const uploadBytes = Number(csvFile?.size || 0) + Number(pdfFile?.size || 0);
+      if (uploadBytes > VERCEL_SAFE_UPLOAD_LIMIT_BYTES) {
+        setError("Vercel のリクエストサイズ上限を超える可能性があります。CSV+PDF 合計を約4MB以下にしてください。大きいファイルはローカル実行か別バックエンドをご利用ください。");
+        return;
+      }
     }
 
     if (!baseURL.trim()) {
