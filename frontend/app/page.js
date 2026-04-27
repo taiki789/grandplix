@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || (process.env.NODE_ENV === "production" ? "/api" : "http://localhost:4000")).replace(/\/$/, "");
 const HORIZONTAL_OPTIONS = [
   { value: "0", label: "左" },
   { value: "1", label: "中央" },
@@ -213,7 +213,7 @@ export default function HomePage() {
     } catch (e) {
       const message = String(e?.message || "").trim();
       if (message === "Failed to fetch") {
-        setError("APIサーバーに接続できません。frontend/.env.local の NEXT_PUBLIC_API_URL と backend の起動状態を確認してください。");
+        setError("APIサーバーに接続できません。ローカルは frontend/.env.local の NEXT_PUBLIC_API_URL と backend の起動状態、Vercel は NEXT_PUBLIC_API_URL または同一デプロイの /api を確認してください。");
       } else {
         setError(message || "生成に失敗しました。");
       }

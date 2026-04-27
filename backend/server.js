@@ -16,12 +16,15 @@ const { parse } = require("csv-parse/sync");
 
 const app = express();
 
+const IS_VERCEL = process.env.VERCEL === "1" || process.env.VERCEL === "true";
+const RUNTIME_DIR = IS_VERCEL ? path.join("/tmp", "grandplix") : __dirname;
+
 const PORT = Number(process.env.PORT || 4000);
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 const ROOT_DIR = __dirname;
-const UPLOAD_DIR = path.join(ROOT_DIR, "uploads");
-const TEMP_DIR = path.join(ROOT_DIR, "temp");
-const OUTPUT_DIR = path.join(ROOT_DIR, "output");
+const UPLOAD_DIR = path.join(RUNTIME_DIR, "uploads");
+const TEMP_DIR = path.join(RUNTIME_DIR, "temp");
+const OUTPUT_DIR = path.join(RUNTIME_DIR, "output");
 const FONT_PATH = path.join(ROOT_DIR, "NotoSansJP-Regular.ttf");
 const JOB_CONCURRENCY = Math.max(1, Number(process.env.JOB_CONCURRENCY || 4));
 const JOB_TTL_MS = Math.max(60_000, Number(process.env.JOB_TTL_MS || 10 * 60 * 1000));
@@ -633,6 +636,10 @@ app.use((error, _req, res, _next) => {
   res.status(400).json({ error: error.message || "リクエスト処理に失敗しました" });
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend listening on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Backend listening on http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
