@@ -1,6 +1,7 @@
 const backendApp = require("../../../backend/server");
 
 export const config = {
+  maxDuration: 300,
   api: {
     bodyParser: false,
     responseLimit: false,

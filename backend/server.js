@@ -33,6 +33,7 @@ const DEFAULT_PLACEMENT_X = 1;
 const DEFAULT_PLACEMENT_Y = 2;
 
 const MAX_IDS = 500;
+const MAX_VERCEL_IDS = Math.max(1, Number(process.env.MAX_VERCEL_IDS || 80));
 const jobs = new Map();
 
 app.use(cors({ origin: FRONTEND_ORIGIN }));
@@ -685,6 +686,10 @@ app.post("/generate/jobs", authMiddleware, upload.fields([{ name: "csvFile", max
       const rows = parseCsvRows(csvBuffer);
       if (rows.length === 0) {
         throw new Error("有効なCSV行がありませんでした");
+      }
+
+      if (rows.length > MAX_VERCEL_IDS) {
+        throw new Error(`Vercel 実行時間制限のため、1回の生成上限は ${MAX_VERCEL_IDS} 件です。CSVを分割して実行してください`);
       }
 
       const zipEntries = await buildZipEntries({
