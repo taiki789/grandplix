@@ -4,7 +4,22 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 
-const API_URL = (process.env.NEXT_PUBLIC_API_URL || (process.env.NODE_ENV === "production" ? "/api" : "http://localhost:4000")).replace(/\/$/, "");
+function resolveApiUrl() {
+  const configured = String(process.env.NEXT_PUBLIC_API_URL || "").trim();
+  const isProduction = process.env.NODE_ENV === "production";
+
+  if (!configured) {
+    return isProduction ? "/api" : "http://localhost:4000";
+  }
+
+  if (isProduction && /https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(configured)) {
+    return "/api";
+  }
+
+  return configured.replace(/\/$/, "");
+}
+
+const API_URL = resolveApiUrl();
 const HORIZONTAL_OPTIONS = [
   { value: "0", label: "左" },
   { value: "1", label: "中央" },
