@@ -24,9 +24,9 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 const ROOT_DIR = __dirname;
 const UPLOAD_DIR = path.join(RUNTIME_DIR, "uploads");
 const TEMP_DIR = path.join(RUNTIME_DIR, "temp");
-const OUTPUT_DIR = path.join(RUNTIME_DIR, "output");
 const FONT_FILE_NAME = "NotoSansJP-Regular.ttf";
-const JOB_CONCURRENCY = Math.max(1, Number(process.env.JOB_CONCURRENCY || 4));
+const MAX_UPLOAD_FILE_SIZE = Math.max(1 * 1024 * 1024, Number(process.env.MAX_UPLOAD_FILE_SIZE || 100 * 1024 * 1024));
+const JOB_CONCURRENCY = Math.max(1, Number(process.env.JOB_CONCURRENCY || (IS_VERCEL ? 1 : 4)));
 const JOB_TTL_MS = Math.max(60_000, Number(process.env.JOB_TTL_MS || 10 * 60 * 1000));
 const DEFAULT_PLACEMENT_X = 1;
 const DEFAULT_PLACEMENT_Y = 2;
@@ -44,7 +44,6 @@ function ensureDirSync(dirPath) {
 
 ensureDirSync(UPLOAD_DIR);
 ensureDirSync(TEMP_DIR);
-ensureDirSync(OUTPUT_DIR);
 
 let firebaseInitialized = false;
 
@@ -174,7 +173,6 @@ function safeNowIso() {
 
 function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUploadedPath, pdfUploadedPath }) {
   const jobDir = path.join(TEMP_DIR, sanitizeFilename(`job-${jobId}`));
-  const outDir = path.join(jobDir, "output");
   const zipPath = path.join(jobDir, `qr_outputs_${jobId}.zip`);
   return {
     id: jobId,
@@ -188,7 +186,6 @@ function createJobRecord({ jobId, baseURL, qrSize, placementX, placementY, csvUp
     csvUploadedPath,
     pdfUploadedPath,
     jobDir,
-    outDir,
     zipPath,
     total: 0,
     processed: 0,
@@ -436,7 +433,7 @@ function createUploadStorage() {
 
 const upload = multer({
   storage: createUploadStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 },
+  limits: { fileSize: MAX_UPLOAD_FILE_SIZE },
   fileFilter: (_req, file, cb) => {
     if (!verifyUploadExtension(file)) {
       cb(new Error(".pdf / .csv ファイルのみアップロード可能です"));
@@ -465,17 +462,19 @@ function buildStatusResponse(job) {
   };
 }
 
-async function createZipFromOutputDir({ outDir, zipPath }) {
+async function createZipFromBufferEntries({ zipPath, entries }) {
   await new Promise((resolve, reject) => {
     const output = fs.createWriteStream(zipPath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
+    const archive = archiver("zip", { zlib: { level: 1 } });
 
     output.on("close", () => resolve());
     output.on("error", reject);
     archive.on("error", reject);
 
     archive.pipe(output);
-    archive.directory(outDir, false);
+    for (const entry of entries) {
+      archive.append(entry.content, { name: entry.name });
+    }
     archive.finalize();
   });
 }
@@ -504,9 +503,9 @@ async function runGenerateJob(jobId) {
     job.total = rows.length;
     job.message = "PDFを生成しています";
 
-    await fsp.mkdir(job.outDir, { recursive: true });
+    const zipEntries = [];
 
-    await runWithConcurrency(rows, JOB_CONCURRENCY, async ({ id, text1, text2 }) => {
+    for (const { id, text1, text2 } of rows) {
       const url = `${job.baseURL}${id}`;
       const safeId = sanitizeFilename(id);
 
@@ -527,17 +526,19 @@ async function runGenerateJob(jobId) {
         fontBytes
       });
 
-      const outputPdfPath = path.join(job.outDir, `output_${safeId}.pdf`);
-      await fsp.writeFile(outputPdfPath, outputBytes);
+      zipEntries.push({
+        name: `output_${safeId}.pdf`,
+        content: outputBytes
+      });
       job.processed += 1;
-    });
+    }
 
     if (job.processed === 0) {
       throw new Error("出力ファイルが生成されませんでした");
     }
 
     job.message = "ZIPを作成しています";
-    await createZipFromOutputDir({ outDir: job.outDir, zipPath: job.zipPath });
+    await createZipFromBufferEntries({ zipPath: job.zipPath, entries: zipEntries });
 
     job.state = "completed";
     job.message = "生成が完了しました";
@@ -702,6 +703,10 @@ app.post("/generate", authMiddleware, (_req, res) => {
 
 app.use((error, _req, res, _next) => {
   if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ error: `ファイルサイズが大きすぎます。上限は ${Math.floor(MAX_UPLOAD_FILE_SIZE / (1024 * 1024))}MB です` });
+      return;
+    }
     res.status(400).json({ error: error.message });
     return;
   }

@@ -52,6 +52,8 @@ NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=...
 PORT=4000
 FRONTEND_ORIGIN=http://localhost:3000
 FIREBASE_PROJECT_ID=your-project-id
+MAX_UPLOAD_FILE_SIZE=104857600
+JOB_CONCURRENCY=1
 # 本番推奨: どちらかを設定
 # FIREBASE_SERVICE_ACCOUNT_JSON={...}
 # GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
@@ -203,6 +205,7 @@ id,text1,col3,col4,text2
 - このアプリは Illustrator を使いません
 - すべてサーバー側で PDF へ直接描画します
 - デプロイ時はフォントファイルを必ず含めてください
+- 生成時は中間PDFを個別保存せず、ZIPへ直接書き込むので、大きいファイルでもディスク使用量を抑えられます
 
 ## 11. Vercel デプロイ時の注意
 
