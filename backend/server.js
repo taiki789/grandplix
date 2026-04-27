@@ -503,6 +503,8 @@ async function runGenerateJob(jobId) {
     job.total = rows.length;
     job.message = "PDFを生成しています";
 
+    await fsp.mkdir(job.jobDir, { recursive: true });
+
     const zipEntries = [];
 
     for (const { id, text1, text2 } of rows) {
