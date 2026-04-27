@@ -528,7 +528,7 @@ async function runGenerateJob(jobId) {
 
       zipEntries.push({
         name: `output_${safeId}.pdf`,
-        content: outputBytes
+        content: Buffer.from(outputBytes)
       });
       job.processed += 1;
     }
