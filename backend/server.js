@@ -48,14 +48,69 @@ ensureDirSync(OUTPUT_DIR);
 
 let firebaseInitialized = false;
 
+function decodeServiceAccountJson(raw) {
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Allow base64-encoded JSON for safer Vercel env storage.
+    try {
+      const decoded = Buffer.from(String(raw), "base64").toString("utf8");
+      return JSON.parse(decoded);
+    } catch {
+      return null;
+    }
+  }
+}
+
+function normalizePrivateKey(raw) {
+  if (!raw) return "";
+  const trimmed = String(raw).trim();
+  if (!trimmed) return "";
+
+  if (trimmed.includes("BEGIN PRIVATE KEY")) {
+    return trimmed.replace(/\\n/g, "\n");
+  }
+
+  try {
+    const decoded = Buffer.from(trimmed, "base64").toString("utf8");
+    if (decoded.includes("BEGIN PRIVATE KEY")) {
+      return decoded.replace(/\\n/g, "\n");
+    }
+  } catch {
+    // Ignore base64 parse errors.
+  }
+
+  return "";
+}
+
+function buildServiceAccountFromEnv() {
+  const jsonAccount = decodeServiceAccountJson(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+  if (jsonAccount) return jsonAccount;
+
+  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+  const privateKey = normalizePrivateKey(process.env.FIREBASE_PRIVATE_KEY || process.env.FIREBASE_PRIVATE_KEY_BASE64);
+
+  if (projectId && clientEmail && privateKey) {
+    return {
+      project_id: projectId,
+      client_email: clientEmail,
+      private_key: privateKey
+    };
+  }
+
+  return null;
+}
+
 function initFirebaseAdmin() {
   if (firebaseInitialized) return;
 
-  const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  const projectId = process.env.FIREBASE_PROJECT_ID;
+  const serviceAccount = buildServiceAccountFromEnv();
+  const projectId = process.env.FIREBASE_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
 
-  if (json) {
-    const serviceAccount = JSON.parse(json);
+  if (serviceAccount) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount)
     });
@@ -488,7 +543,10 @@ async function runGenerateJob(jobId) {
 async function authMiddleware(req, res, next) {
   try {
     if (!firebaseInitialized) {
-      res.status(500).json({ error: "サーバー側のFirebase Admin設定が不足しています" });
+      res.status(500).json({
+        error: "サーバー側のFirebase Admin設定が不足しています",
+        detail: "FIREBASE_SERVICE_ACCOUNT_JSON もしくは FIREBASE_PROJECT_ID（または NEXT_PUBLIC_FIREBASE_PROJECT_ID）を設定してください"
+      });
       return;
     }
 
